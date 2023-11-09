@@ -4,6 +4,7 @@ import logging
 from api_keys import load_api_keys
 from settings import load_settings
 from discord_intents import setup_intents
+from discord_ui import UIHandler, example_button_callback
 from message_processing import (
     prepare_message_history,
     generate_response,
@@ -22,6 +23,7 @@ def setup_logging(settings):
 
 
 def main():
+    ui_handler = UIHandler()
     api_keys = load_api_keys()
     openai.api_key = api_keys["openai_api_key"]
     discord_api_token = api_keys["discord_api_token"]
@@ -56,6 +58,18 @@ def main():
         logging.info(f"Pong! sent to: {ctx.user} in {ctx.guild}'s channel {ctx.channel}")
         await ctx.response.send_message("Pong!", ephemeral=True)
 
+    # TODO: Add a button command for the bot to call. This is for testing only.
+    @tree.command(
+        name="button",
+        description="Spawns a test button"
+    )
+    async def button(ctx: discord.Interaction):
+        logging.info(f"Button spawned in: {ctx.user} in {ctx.guild}'s channel {ctx.channel}")
+        view = ui_handler.create_button_view(label="Click me!", style=discord.ButtonStyle.primary,
+                                             custom_id="example_button", callback=example_button_callback)
+        await ui_handler.send_message_with_view(ctx.channel, "Here's a button for you:", view)
+        await ctx.response.send_message("Button spawned!", ephemeral=True)
+
     @tree.command(
         name="set_prompt_system",
         description="Change the system prompt",
@@ -76,6 +90,11 @@ def main():
     )
     async def set_channel_command(ctx: discord.Interaction):
         await set_channel(ctx, settings)
+
+    @discord_client.event
+    async def on_interaction(interaction):
+        # Pass the interaction to the UIHandler
+        await ui_handler.on_interaction(interaction)
 
     @discord_client.event
     async def on_message(current_message):
@@ -103,6 +122,7 @@ def main():
                 reply = await generate_response(message_history, current_message, settings, openai_client)
 
                 if reply is None or reply.replace(" ", "") == "":
+                    logging.info("Received empty reply from OpenAI! Skipping...")
                     return
 
                 logging.info(f"Generated text: {reply}")
