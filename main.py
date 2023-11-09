@@ -1,151 +1,26 @@
-import sys
 import openai
-import re
-import asyncio
-import logging
-import tiktoken
-import json
 import discord
-from typing import Literal
+import logging
+from api_keys import load_api_keys
+from settings import load_settings
+from discord_intents import setup_intents
+from message_processing import (
+    prepare_message_history,
+    generate_response,
+    get_encoding_for_model,
+)
+from commands import (
+    set_prompt_system,
+    set_model,
+    set_channel,
+)
 
 
-def load_api_keys():
-    """Load API keys from a JSON file. If the file doesn't exist, create a template."""
-    try:
-        with open("api_keys.json", "r") as api_keys_file:
-            return json.load(api_keys_file)
-    except FileNotFoundError:
-        api_keys = {
-            "openai_api_key": "PUT_KEY_HERE",
-            "discord_api_token": "PUT_TOKEN_HERE"
-        }
-        with open("api_keys.json", "w") as api_keys_file:
-            json.dump(api_keys, api_keys_file)
-
-        logging.critical(
-            "api_keys.json not found! File \"api_keys.json\n has been made as an example. Enter your API "
-            "keys and restart the bot.")
-        sys.exit(1)
-
-
-def save_settings(file_name, settings):
-    """Save settings to a JSON file."""
-    with open(file_name, "w") as file:
-        json.dump(settings, file, indent=4)
-
-
-def load_settings(file_name):
-    """Loads settings JSON, if it doesn't exist, create a template."""
-    try:
-        with open(file_name, "r") as settings_file:
-            return json.load(settings_file)
-    except FileNotFoundError:
-        settings = {
-            "prompt_model": "gpt-3.5-turbo-16k",
-            "prompt_system": "{Put your system prompt here!}",
-            "prompt_max_tokens": 512,
-            "logging_level": "INFO",
-            "discord_intents": {
-                "guilds": True,
-                "members": True,
-                "emojis": True,
-                "messages": True,
-                "reactions": True
-            },
-            "bot_admins": [],
-            "whitelist_channels": []
-        }
-        with open(file_name, "w") as settings_file:
-            json.dump(settings, settings_file, indent=4)
-        logging.critical(
-            f"{file_name} not found! File \"{file_name}\" has been made as an example. Enter your settings and "
-            f"restart the bot.")
-        sys.exit(1)
-
-
+# FIXME: Can't move this to logging_setup because logging is still required in main() and so the library is imported
+#        is imported twice.
 def setup_logging(settings):
     """Set up logging level from global settings JSON."""
     logging.basicConfig(level=settings["logging_level"])
-
-
-def setup_intents(settings):
-    """Set up Discord intents from global settings JSON."""
-    intents = discord.Intents.default()
-    intents_dict = settings["discord_intents"]
-    for intent_name, enabled in intents_dict.items():
-        if hasattr(intents, intent_name):
-            setattr(intents, intent_name, enabled)
-    return intents
-
-
-def count_tokens(text, enc):
-    """Count the number of tokens in a text string."""
-    return len(enc.encode(text))
-
-
-async def prepare_message_history(current_message, settings, enc, client):
-    """Prepare message history for the OpenAI API using the "chat" format (system, user, assistant)."""
-    user_message = {
-        "role": "user",
-        "content": f"{current_message.author.name}#{current_message.author.discriminator}: "
-                   f"{current_message.content}"
-    }
-
-    message_history = [
-        {"role": "system", "content": f'{settings["prompt_system"]}'},
-        {"role": "user", "content": user_message["content"]}
-    ]
-    token_count = count_tokens(user_message["content"], enc)
-
-    async for msg in current_message.channel.history(limit=100, oldest_first=False):
-        if msg.author == client.user:
-            role = "assistant"
-            content = f"{msg.content}"
-        else:
-            role = "user"
-            content = f"{msg.author.name}#{msg.author.discriminator}: {msg.content}"
-
-        tokens = count_tokens(content, enc)
-
-        if token_count + tokens + 1 < settings["prompt_max_tokens"]:
-            message_history.insert(0, {"role": role, "content": content})
-            token_count += tokens + 1
-        else:
-            break
-
-    return message_history, token_count
-
-
-async def generate_response(message_history, current_message, settings):
-    """Generate a response using the OpenAI API."""
-    loop = asyncio.get_running_loop()
-    response = await loop.run_in_executor(None,
-                                          lambda: openai.ChatCompletion.create(
-                                              model=settings["prompt_model"],
-                                              messages=message_history,
-                                              max_tokens=settings["prompt_max_tokens"],
-                                              user=f"{current_message.author.name}#"
-                                                   f"{current_message.author.discriminator}")
-                                          )
-    return response.choices[0].message.content.strip()
-
-
-def remove_mentions(reply, current_message):
-    """Remove any mentions if it's not to a person in this server."""
-    server_members = [member.id for member in current_message.guild.members]
-    for mention in re.findall(r"<@!?\d+>", reply):
-        try:
-            if int(mention[2:-1]) not in server_members:
-                reply = reply.replace(mention, "")
-        except ValueError:
-            continue
-        try:
-            if int(mention[3:-1]) not in server_members:
-                reply = reply.replace(mention, "")
-        except ValueError as e:
-            logging.error(f"Error occurred while removing mentions!\n{e}\nContinuing...")
-            continue
-    return reply
 
 
 def main():
@@ -153,7 +28,7 @@ def main():
     openai.api_key = api_keys["openai_api_key"]
     discord_api_token = api_keys["discord_api_token"]
     settings = load_settings("settings.json")
-    enc = tiktoken.encoding_for_model(settings["prompt_model"])
+    enc = get_encoding_for_model(settings["prompt_model"])
 
     setup_logging(settings)
 
@@ -178,62 +53,35 @@ def main():
         description="Test if the bot is alive :))"
     )
     async def ping(ctx: discord.Interaction):
-        logging.info(f"Pong! sent to: {ctx.user} in {ctx.guild}")
+        logging.info(f"Pong! sent to: {ctx.user} in {ctx.guild}'s channel {ctx.channel}")
         await ctx.response.send_message("Pong!", ephemeral=True)
 
     @tree.command(
         name="set_prompt_system",
         description="Change the system prompt",
     )
-    async def set_prompt_system(ctx: discord.Interaction, new_prompt: str):
-        if ctx.user.id not in settings["bot_admins"]:
-            await ctx.response.send_message("You do not have permission to change the system prompt!", ephemeral=True)
-            return
-        settings["prompt_system"] = new_prompt
-        save_settings("settings.json", settings)
-        await ctx.response.send_message(f"# System prompt changed!", ephemeral=True)
+    async def set_prompt_system_command(ctx: discord.Interaction, new_prompt: str):
+        await set_prompt_system(ctx, new_prompt, settings)
 
     @tree.command(
         name="set_model",
         description="Change the model",
     )
-    async def set_model(ctx: discord.Interaction, new_model: Literal[
-        "gpt-3.5-turbo",
-        "gpt-3.5-turbo-16k",
-        "gpt-3.5-turbo-16k-0613",
-        "gpt-3.5-turbo-0613",
-        "gpt-3.5-turbo-0301",
-        "gpt-4",
-        "gpt-4-0613",
-        "gpt-4-0314"
-    ]):
-        if ctx.user.id not in settings["bot_admins"]:
-            await ctx.response.send_message("You do not have permission to change the model!", ephemeral=True)
-            return
-        settings["prompt_model"] = new_model
-        save_settings("settings.json", settings)
-        await ctx.response.send_message(f"Model changed to: `{new_model}`!", ephemeral=True)
+    async def set_model_command(ctx: discord.Interaction, new_model: str):
+        await set_model(ctx, new_model, settings)
 
     @tree.command(
         name="set_channel",
         description="Sets current channel as the bot channel",
     )
-    async def set_channel(ctx: discord.Interaction):
-        if ctx.user.id not in settings["bot_admins"]:
-            await ctx.response.send_message("You do not have permission to change the bot channel!", ephemeral=True)
-            return
-        if ctx.channel.id in settings["whitelist_channels"]:
-            await ctx.response.send_message("This channel is already the bot channel!", ephemeral=True)
-            return
-        settings["whitelist_channels"].append(ctx.channel.id)
-        save_settings("settings.json", settings)
-        await ctx.response.send_message(f"Added {ctx.channel.name} to the whitelist!", ephemeral=True)
+    async def set_channel_command(ctx: discord.Interaction):
+        await set_channel(ctx, settings)
 
     @client.event
     async def on_message(current_message):
         if current_message.author == client.user:
             return
-        if current_message.TextChannel.id in settings["whitelist_channels"]:
+        if current_message.channel.id in settings["whitelist_channels"]:
             try:
                 logging.info(f"Received message: \"{current_message.content}\"")
 
@@ -252,8 +100,6 @@ def main():
                 logging.info(f"Total token count: {token_count}")
 
                 reply = await generate_response(message_history, current_message, settings)
-
-                reply = remove_mentions(reply, current_message)
 
                 if reply is None or reply.replace(" ", "") == "":
                     return
