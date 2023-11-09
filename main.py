@@ -41,21 +41,19 @@ def load_settings(file_name):
             return json.load(settings_file)
     except FileNotFoundError:
         settings = {
-            "global_settings": {
-                "prompt_model": "gpt-3.5-turbo-16k",
-                "prompt_system": "{Put your system prompt here!}",
-                "prompt_max_tokens": 512,
-                "logging_level": "INFO",
-                "discord_intents": {
-                    "guilds": True,
-                    "members": True,
-                    "emojis": True,
-                    "messages": True,
-                    "reactions": True
-                },
-                "bot_admins": []
+            "prompt_model": "gpt-3.5-turbo-16k",
+            "prompt_system": "{Put your system prompt here!}",
+            "prompt_max_tokens": 512,
+            "logging_level": "INFO",
+            "discord_intents": {
+                "guilds": True,
+                "members": True,
+                "emojis": True,
+                "messages": True,
+                "reactions": True
             },
-            "whitelist_servers": []
+            "bot_admins": [],
+            "whitelist_channels": []
         }
         with open(file_name, "w") as settings_file:
             json.dump(settings, settings_file, indent=4)
@@ -67,13 +65,13 @@ def load_settings(file_name):
 
 def setup_logging(settings):
     """Set up logging level from global settings JSON."""
-    logging.basicConfig(level=settings["global_settings"]["logging_level"])
+    logging.basicConfig(level=settings["logging_level"])
 
 
 def setup_intents(settings):
     """Set up Discord intents from global settings JSON."""
     intents = discord.Intents.default()
-    intents_dict = settings["global_settings"]["discord_intents"]
+    intents_dict = settings["discord_intents"]
     for intent_name, enabled in intents_dict.items():
         if hasattr(intents, intent_name):
             setattr(intents, intent_name, enabled)
@@ -94,7 +92,7 @@ async def prepare_message_history(current_message, settings, enc, client):
     }
 
     message_history = [
-        {"role": "system", "content": f'{settings["global_settings"]["prompt_system"]}'},
+        {"role": "system", "content": f'{settings["prompt_system"]}'},
         {"role": "user", "content": user_message["content"]}
     ]
     token_count = count_tokens(user_message["content"], enc)
@@ -109,7 +107,7 @@ async def prepare_message_history(current_message, settings, enc, client):
 
         tokens = count_tokens(content, enc)
 
-        if token_count + tokens + 1 < settings["global_settings"]["prompt_max_tokens"]:
+        if token_count + tokens + 1 < settings["prompt_max_tokens"]:
             message_history.insert(0, {"role": role, "content": content})
             token_count += tokens + 1
         else:
@@ -123,9 +121,9 @@ async def generate_response(message_history, current_message, settings):
     loop = asyncio.get_running_loop()
     response = await loop.run_in_executor(None,
                                           lambda: openai.ChatCompletion.create(
-                                              model=settings["global_settings"]["prompt_model"],
+                                              model=settings["prompt_model"],
                                               messages=message_history,
-                                              max_tokens=settings["global_settings"]["prompt_max_tokens"],
+                                              max_tokens=settings["prompt_max_tokens"],
                                               user=f"{current_message.author.name}#"
                                                    f"{current_message.author.discriminator}")
                                           )
@@ -155,7 +153,7 @@ def main():
     openai.api_key = api_keys["openai_api_key"]
     discord_api_token = api_keys["discord_api_token"]
     settings = load_settings("settings.json")
-    enc = tiktoken.encoding_for_model(settings["global_settings"]["prompt_model"])
+    enc = tiktoken.encoding_for_model(settings["prompt_model"])
 
     setup_logging(settings)
 
@@ -188,12 +186,12 @@ def main():
         description="Change the system prompt",
     )
     async def set_prompt_system(ctx: discord.Interaction, new_prompt: str):
-        if ctx.user.id not in settings["global_settings"]["bot_admins"]:
-            await ctx.response.send_message("You do not have permission to change the system prompt.")
+        if ctx.user.id not in settings["bot_admins"]:
+            await ctx.response.send_message("You do not have permission to change the system prompt!", ephemeral=True)
             return
-        settings["global_settings"]["prompt_system"] = new_prompt
+        settings["prompt_system"] = new_prompt
         save_settings("settings.json", settings)
-        await ctx.response.send_message(f"System prompt changed to: {new_prompt}")
+        await ctx.response.send_message(f"# System prompt changed!", ephemeral=True)
 
     @tree.command(
         name="set_model",
@@ -209,24 +207,33 @@ def main():
         "gpt-4-0613",
         "gpt-4-0314"
     ]):
-        if ctx.user.id not in settings["global_settings"]["bot_admins"]:
-            await ctx.response.send_message("You do not have permission to change the model.")
+        if ctx.user.id not in settings["bot_admins"]:
+            await ctx.response.send_message("You do not have permission to change the model!", ephemeral=True)
             return
-        settings["global_settings"]["prompt_model"] = new_model
+        settings["prompt_model"] = new_model
         save_settings("settings.json", settings)
-        await ctx.response.send_message(f"Model changed to: `{new_model}`")
+        await ctx.response.send_message(f"Model changed to: `{new_model}`!", ephemeral=True)
 
     @tree.command(
         name="set_channel",
         description="Sets current channel as the bot channel",
     )
-    # TODO:
+    async def set_channel(ctx: discord.Interaction):
+        if ctx.user.id not in settings["bot_admins"]:
+            await ctx.response.send_message("You do not have permission to change the bot channel!", ephemeral=True)
+            return
+        if ctx.channel.id in settings["whitelist_channels"]:
+            await ctx.response.send_message("This channel is already the bot channel!", ephemeral=True)
+            return
+        settings["whitelist_channels"].append(ctx.channel.id)
+        save_settings("settings.json", settings)
+        await ctx.response.send_message(f"Added {ctx.channel.name} to the whitelist!", ephemeral=True)
 
     @client.event
     async def on_message(current_message):
         if current_message.author == client.user:
             return
-        if current_message.guild.id in settings["global_settings"]["whitelist_servers"]:
+        if current_message.TextChannel.id in settings["whitelist_channels"]:
             try:
                 logging.info(f"Received message: \"{current_message.content}\"")
 
@@ -267,7 +274,7 @@ def main():
                 await current_message.response.send_message(f"Got an error:\n{e}\nPlease try again later!")
         else:
             logging.info(f"Received message from non-whitelisted server: \"{current_message.guild.id}\"\n"
-                         f"(\"{current_message.guild.name}\")")
+                         f"(\"{current_message.guild.name}\"), skipping...")
 
     client.run(token=discord_api_token)
 
