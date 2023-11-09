@@ -16,8 +16,6 @@ from commands import (
 )
 
 
-# FIXME: Can't move this to logging_setup because logging is still required in main() and so the library is imported
-#        is imported twice.
 def setup_logging(settings):
     """Set up logging level from global settings JSON."""
     logging.basicConfig(level=settings["logging_level"])
@@ -34,19 +32,21 @@ def main():
 
     intents = setup_intents(settings)
 
-    client = discord.Client(intents=intents)
-    tree = discord.app_commands.CommandTree(client)
+    openai_client = openai.OpenAI(api_key=openai.api_key)
+    discord_client = discord.Client(intents=intents)
 
-    @client.event
+    tree = discord.app_commands.CommandTree(discord_client)
+
+    @discord_client.event
     async def on_connect():
         logging.info("Connected to Discord!")
 
-    @client.event
+    @discord_client.event
     async def on_ready():
         logging.info("Ready!")
         logging.debug("Syncing commands...")
         await tree.sync()
-        logging.info(f'We have logged in as {client.user}')
+        logging.info(f'We have logged in as {discord_client.user}')
 
     @tree.command(
         name="ping",
@@ -77,9 +77,9 @@ def main():
     async def set_channel_command(ctx: discord.Interaction):
         await set_channel(ctx, settings)
 
-    @client.event
+    @discord_client.event
     async def on_message(current_message):
-        if current_message.author == client.user:
+        if current_message.author == discord_client.user:
             return
         if current_message.channel.id in settings["whitelist_channels"]:
             try:
@@ -91,7 +91,8 @@ def main():
 
                 await current_message.channel.typing()
 
-                message_history, token_count = await prepare_message_history(current_message, settings, enc, client)
+                message_history, token_count = await prepare_message_history(current_message, settings, enc,
+                                                                             discord_client)
 
                 logging.info("Message history:")
                 for msg in message_history:
@@ -99,7 +100,7 @@ def main():
 
                 logging.info(f"Total token count: {token_count}")
 
-                reply = await generate_response(message_history, current_message, settings)
+                reply = await generate_response(message_history, current_message, settings, openai_client)
 
                 if reply is None or reply.replace(" ", "") == "":
                     return
@@ -107,7 +108,7 @@ def main():
                 logging.info(f"Generated text: {reply}")
 
                 try:
-                    if client.user.mentioned_in(current_message):
+                    if discord_client.user.mentioned_in(current_message):
                         logging.info("Replying to message!")
                         await current_message.channel.send(reply, reference=current_message.to_reference())
                     else:
@@ -122,7 +123,7 @@ def main():
             logging.info(f"Received message from non-whitelisted server: \"{current_message.guild.id}\"\n"
                          f"(\"{current_message.guild.name}\"), skipping...")
 
-    client.run(token=discord_api_token)
+    discord_client.run(token=discord_api_token)
 
 
 if __name__ == "__main__":

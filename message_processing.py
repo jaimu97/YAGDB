@@ -1,5 +1,4 @@
 import asyncio
-import openai
 import tiktoken
 from typing import Tuple
 
@@ -47,11 +46,11 @@ async def prepare_message_history(current_message, settings, enc, client) -> Tup
     return message_history, token_count
 
 
-async def generate_response(message_history, current_message, settings):
+async def generate_response(message_history, current_message, settings, client):
     """Generate a response using the OpenAI API."""
     loop = asyncio.get_running_loop()
     response = await loop.run_in_executor(None,
-                                          lambda: openai.ChatCompletion.create(
+                                          lambda: client.chat.completions.create(
                                               model=settings["prompt_model"],
                                               messages=message_history,
                                               max_tokens=settings["prompt_max_tokens"],
