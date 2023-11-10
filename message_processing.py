@@ -22,12 +22,13 @@ async def prepare_message_history(current_message, settings, enc, client) -> Tup
     }
 
     message_history = [
-        {"role": "system", "content": f'{settings["prompt_system"]}'},
-        {"role": "user", "content": user_message["content"]}
+        {"role": "system", "content": f'{settings["prompt_system"]}'}
     ]
     token_count = count_tokens(user_message["content"], enc)
 
     async for msg in current_message.channel.history(limit=100, oldest_first=False):
+        if msg.id == current_message.id:
+            continue
         if msg.author == client.user:
             role = "assistant"
             content = f"{msg.clean_content}"
@@ -38,11 +39,12 @@ async def prepare_message_history(current_message, settings, enc, client) -> Tup
         tokens = count_tokens(content, enc)
 
         if token_count + tokens + 1 < settings["prompt_max_tokens"]:
-            message_history.insert(0, {"role": role, "content": content})
+            message_history.insert(1, {"role": role, "content": content})
             token_count += tokens + 1
         else:
             break
 
+    message_history.append(user_message)
     return message_history, token_count
 
 
@@ -53,8 +55,10 @@ async def generate_response(message_history, current_message, settings, client):
                                           lambda: client.chat.completions.create(
                                               model=settings["prompt_model"],
                                               messages=message_history,
+                                              temperature=0.7,
+                                              top_p=0.9,
                                               max_tokens=settings["prompt_max_tokens"],
                                               user=f"{current_message.author.name}#"
-                                                   f"{current_message.author.discriminator}")
+                                                   f"{current_message.author.discriminator}"),
                                           )
     return response.choices[0].message.content.strip()

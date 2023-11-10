@@ -4,7 +4,6 @@ import logging
 from api_keys import load_api_keys
 from settings import load_settings
 from discord_intents import setup_intents
-from discord_ui import UIHandler, example_button_callback
 from message_processing import (
     prepare_message_history,
     generate_response,
@@ -16,6 +15,9 @@ from commands import (
     set_channel,
 )
 
+last_messages = []
+last_user_message = None
+
 
 def setup_logging(settings):
     """Set up logging level from global settings JSON."""
@@ -23,7 +25,6 @@ def setup_logging(settings):
 
 
 def main():
-    ui_handler = UIHandler()
     api_keys = load_api_keys()
     openai.api_key = api_keys["openai_api_key"]
     discord_api_token = api_keys["discord_api_token"]
@@ -58,18 +59,6 @@ def main():
         logging.info(f"Pong! sent to: {ctx.user} in {ctx.guild}'s channel {ctx.channel}")
         await ctx.response.send_message("Pong!", ephemeral=True)
 
-    # TODO: Add a button command for the bot to call. This is for testing only.
-    @tree.command(
-        name="button",
-        description="Spawns a test button"
-    )
-    async def button(ctx: discord.Interaction):
-        logging.info(f"Button spawned in: {ctx.user} in {ctx.guild}'s channel {ctx.channel}")
-        view = ui_handler.create_button_view(label="Click me!", style=discord.ButtonStyle.primary,
-                                             custom_id="example_button", callback=example_button_callback)
-        await ui_handler.send_message_with_view(ctx.channel, "Here's a button for you:", view)
-        await ctx.response.send_message("Button spawned!", ephemeral=True)
-
     @tree.command(
         name="set_prompt_system",
         description="Change the system prompt",
@@ -91,13 +80,45 @@ def main():
     async def set_channel_command(ctx: discord.Interaction):
         await set_channel(ctx, settings)
 
-    @discord_client.event
-    async def on_interaction(interaction):
-        # Pass the interaction to the UIHandler
-        await ui_handler.on_interaction(interaction)
+    @tree.command(
+        name="regenerate",
+        description="Delete the last reply made by the bot and generate a new one",
+    )
+    async def regenerate_command(ctx: discord.Interaction):
+        global last_messages
+        global last_user_message
+
+        for message in last_messages:
+            await message.delete()
+
+        if last_user_message is not None:
+            message_history, token_count = await prepare_message_history(last_user_message, settings, enc,
+                                                                         discord_client)
+            reply = await generate_response(message_history, last_user_message, settings, openai_client)
+
+            if reply:
+                max_length = 2000
+                reply_chunks = [reply[i:i + max_length] for i in range(0, len(reply), max_length)]
+
+                last_messages = []
+                for chunk in reply_chunks:
+                    if chunk.strip():
+                        message = await ctx.channel.send(chunk)
+                        last_messages.append(message)
+                    else:
+                        logging.info("Skipping empty or whitespace-only message chunk.")
+
+                await ctx.response.send_message("Regenerated response!", ephemeral=True)
+            else:
+                logging.info("Received empty reply from OpenAI! Skipping...")
+        else:
+            logging.error("No user message to regenerate.")
+            await ctx.response.send_message("No user message to regenerate.", ephemeral=True)
 
     @discord_client.event
     async def on_message(current_message):
+        global last_messages, last_user_message
+
         if current_message.author == discord_client.user:
             return
         if current_message.channel.id in settings["whitelist_channels"]:
@@ -121,24 +142,30 @@ def main():
 
                 reply = await generate_response(message_history, current_message, settings, openai_client)
 
-                if reply is None or reply.replace(" ", "") == "":
+                if reply:
+                    max_length = 2000
+                    reply_chunks = [reply[i:i + max_length] for i in range(0, len(reply), max_length)]
+
+                    last_messages = []  # Clear the list of last messages
+                    for chunk in reply_chunks:
+                        if chunk.strip():
+                            if discord_client.user.mentioned_in(current_message):
+                                message = await current_message.channel.send(chunk,
+                                                                             reference=current_message.to_reference())
+                            else:
+                                message = await current_message.channel.send(chunk)
+                            last_messages.append(message)  # Store the sent message
+                        else:
+                            logging.info("Skipping empty or whitespace-only message chunk.")
+                else:
                     logging.info("Received empty reply from OpenAI! Skipping...")
-                    return
 
-                logging.info(f"Generated text: {reply}")
+                last_user_message = current_message
 
-                try:
-                    if discord_client.user.mentioned_in(current_message):
-                        logging.info("Replying to message!")
-                        await current_message.channel.send(reply, reference=current_message.to_reference())
-                    else:
-                        logging.info("Sending message!")
-                        await current_message.channel.send(reply)
-                except discord.errors.HTTPException:
-                    logging.info("Message either too long or empty!")
             except Exception as e:
                 logging.error(f"Got an error:\n{e}\nPlease try again later!")
-                await current_message.response.send_message(f"Got an error:\n{e}\nPlease try again later!")
+                await current_message.channel.send(f"Got an error:\n{e}\nPlease try again later!")
+
         else:
             logging.info(f"Received message from non-whitelisted server: \"{current_message.guild.id}\"\n"
                          f"(\"{current_message.guild.name}\"), skipping...")
