@@ -1,5 +1,6 @@
 import asyncio
 import tiktoken
+import uuid
 from typing import Tuple
 
 
@@ -17,7 +18,7 @@ async def prepare_message_history(interaction, settings, enc, client) -> Tuple:
     """Prepare message history for the OpenAI API using the "chat" format (system, user, assistant)."""
     user_message = {
         "role": "user",
-        "content": f"{interaction.user.name}#{interaction.user.discriminator}: {interaction.data.get('content', '')}"
+        "content": f"{interaction.user.name}: {interaction.data.get('content', '')}"
     }
 
     message_history = [
@@ -33,7 +34,7 @@ async def prepare_message_history(interaction, settings, enc, client) -> Tuple:
             content = f"{msg.clean_content}"
         else:
             role = "user"
-            content = f"{msg.author.name}#{msg.author.discriminator}: {msg.clean_content}"
+            content = f"{msg.author.name}: {msg.clean_content}"
 
         tokens = count_tokens(content, enc)
 
@@ -58,7 +59,7 @@ async def generate_response(message_history, interaction, settings, client):
             temperature=0.7,
             top_p=0.9,
             max_tokens=settings["prompt_max_tokens"],
-            user=f"{interaction.user.name}#{interaction.user.discriminator}"
+            user=f"{interaction.user.name}.{uuid.uuid4()}"
         ),
     )
     return response.choices[0].message.content.strip()

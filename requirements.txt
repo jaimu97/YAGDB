@@ -1,3 +1,4 @@
 openai
-discord.py
+discord.py[voice]
 tiktoken
+PyNaCl

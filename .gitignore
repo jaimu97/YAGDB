@@ -157,3 +157,4 @@ cython_debug/
 
 settings.json
 api_keys.json
+speech/
