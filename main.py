@@ -1,18 +1,14 @@
 import openai
 import discord
 import logging
+from typing import Literal
 from api_keys import load_api_keys
-from settings import load_settings
+from settings import save_settings, load_settings
 from discord_intents import setup_intents
 from message_processing import (
     prepare_message_history,
     generate_response,
     get_encoding_for_model,
-)
-from commands import (
-    set_prompt_system,
-    set_model,
-    set_channel,
 )
 
 last_messages = []
@@ -60,25 +56,74 @@ def main():
         await ctx.response.send_message("Pong!", ephemeral=True)
 
     @tree.command(
-        name="set_prompt_system",
+        name="set_system_prompt",
         description="Change the system prompt",
     )
-    async def set_prompt_system_command(ctx: discord.Interaction, new_prompt: str):
-        await set_prompt_system(ctx, new_prompt, settings)
+    async def set_system_prompt(ctx: discord.Interaction, new_prompt: str):
+        if ctx.user.id not in settings["bot_admins"]:
+            await ctx.response.send_message("You do not have permission to change the system prompt!", ephemeral=True)
+            return
+        settings["system_prompt"] = new_prompt
+        save_settings("settings.json", settings)
+        await ctx.response.send_message(f"# System prompt changed!", ephemeral=True)
 
     @tree.command(
         name="set_model",
         description="Change the model",
     )
-    async def set_model_command(ctx: discord.Interaction, new_model: str):
-        await set_model(ctx, new_model, settings)
+    async def set_model(ctx: discord.Interaction, new_model: Literal[
+        "gpt-3.5-turbo",
+        "gpt-3.5-turbo-16k",
+        "gpt-3.5-turbo-16k-0613",
+        "gpt-3.5-turbo-1106",
+        "gpt-3.5-turbo-0613",
+        "gpt-3.5-turbo-0301",
+        "gpt-4",
+        "gpt-4-1106-preview",
+        "gpt-4-0613",
+        "gpt-4-0314"
+    ]):
+        if ctx.user.id not in settings["bot_admins"]:
+            await ctx.response.send_message("You do not have permission to change the model!", ephemeral=True)
+            return
+        settings["prompt_model"] = new_model
+        save_settings("settings.json", settings)
+        await ctx.response.send_message(f"Model changed to: `{new_model}`!", ephemeral=True)
 
     @tree.command(
-        name="set_channel",
-        description="Sets current channel as the bot channel",
+        name="setup",
+        description="Initial setup for the bot in the current channel",
     )
-    async def set_channel_command(ctx: discord.Interaction):
-        await set_channel(ctx, settings)
+    async def setup_command(ctx: discord.Interaction):
+        if ctx.user.id not in settings["bot_admins"]:
+            await ctx.response.send_message("You do not have permission to setup the bot in this channel!",
+                                            ephemeral=True)
+            return
+        if ctx.channel.id in settings["whitelist_channels"]:
+            await ctx.response.send_message("This channel has already been set up!", ephemeral=True)
+            return
+
+        await ctx.response.defer(ephemeral=True)
+
+        settings["whitelist_channels"].append(ctx.channel.id)
+        save_settings("settings.json", settings)
+
+        message_history = [
+            {"role": "system", "content": f'Your name is {discord_client.user.name}. '
+                                          f'{settings["system_prompt"]} '
+                                          f'{settings["welcome_prompt"]}'}
+        ]
+        reply = await generate_response(message_history, ctx, settings, openai_client)
+
+        if reply:
+            await ctx.channel.send(reply)
+        else:
+            await ctx.followup.send("Oops! Something went wrong. Please try again later",
+                                    ephemeral=True)
+            return
+
+        await ctx.followup.send(f"Channel \"{ctx.channel.name}\" has been set up and is now ready for use!",
+                                ephemeral=True)
 
     @tree.command(
         name="regenerate",
@@ -97,17 +142,7 @@ def main():
             reply = await generate_response(message_history, last_user_message, settings, openai_client)
 
             if reply:
-                max_length = 2000
-                reply_chunks = [reply[i:i + max_length] for i in range(0, len(reply), max_length)]
-
-                last_messages = []
-                for chunk in reply_chunks:
-                    if chunk.strip():
-                        message = await ctx.channel.send(chunk)
-                        last_messages.append(message)
-                    else:
-                        logging.info("Skipping empty or whitespace-only message chunk.")
-
+                last_messages = await send_reply_chunks(ctx, reply)
                 await ctx.response.send_message("Regenerated response!", ephemeral=True)
             else:
                 logging.info("Received empty reply from OpenAI! Skipping...")
@@ -115,60 +150,45 @@ def main():
             logging.error("No user message to regenerate.")
             await ctx.response.send_message("No user message to regenerate.", ephemeral=True)
 
-    @discord_client.event
-    async def on_message(current_message):
+    @tree.command(
+        name="reply",
+        description="Prompt the bot to reply to a message",
+    )
+    async def reply_command(ctx: discord.Interaction):
         global last_messages, last_user_message
 
-        if current_message.author == discord_client.user:
-            return
-        if current_message.channel.id in settings["whitelist_channels"]:
-            try:
-                logging.info(f"Received message: \"{current_message.content}\"")
+        await ctx.response.defer(ephemeral=True)
 
-                if not current_message.content.strip():
-                    logging.error(f'Received a blank message form Discord')
-                    return
+        message_history, token_count = await prepare_message_history(ctx, settings, enc, discord_client)
 
-                await current_message.channel.typing()
+        logging.info("Message history:")
+        for msg in message_history:
+            logging.info(f"{msg['role']}: {msg['content']}")
 
-                message_history, token_count = await prepare_message_history(current_message, settings, enc,
-                                                                             discord_client)
+        logging.info(f"Total token count: {token_count}")
 
-                logging.info("Message history:")
-                for msg in message_history:
-                    logging.info(f"{msg['role']}: {msg['content']}")
+        reply = await generate_response(message_history, ctx, settings, openai_client)
 
-                logging.info(f"Total token count: {token_count}")
-
-                reply = await generate_response(message_history, current_message, settings, openai_client)
-
-                if reply:
-                    max_length = 2000
-                    reply_chunks = [reply[i:i + max_length] for i in range(0, len(reply), max_length)]
-
-                    last_messages = []  # Clear the list of last messages
-                    for chunk in reply_chunks:
-                        if chunk.strip():
-                            if discord_client.user.mentioned_in(current_message):
-                                message = await current_message.channel.send(chunk,
-                                                                             reference=current_message.to_reference())
-                            else:
-                                message = await current_message.channel.send(chunk)
-                            last_messages.append(message)  # Store the sent message
-                        else:
-                            logging.info("Skipping empty or whitespace-only message chunk.")
-                else:
-                    logging.info("Received empty reply from OpenAI! Skipping...")
-
-                last_user_message = current_message
-
-            except Exception as e:
-                logging.error(f"Got an error:\n{e}\nPlease try again later!")
-                await current_message.channel.send(f"Got an error:\n{e}\nPlease try again later!")
-
+        if reply:
+            last_messages = await send_reply_chunks(ctx, reply)
         else:
-            logging.info(f"Received message from non-whitelisted server: \"{current_message.guild.id}\"\n"
-                         f"(\"{current_message.guild.name}\"), skipping...")
+            logging.info("Received empty reply from OpenAI! Skipping...")
+
+        last_user_message = ctx
+        await ctx.followup.send("Replied to the message!", ephemeral=True)
+
+    async def send_reply_chunks(ctx, reply):
+        max_length = 2000
+        reply_chunks = [reply[i:i + max_length] for i in range(0, len(reply), max_length)]
+
+        last_messages = []
+        for chunk in reply_chunks:
+            if chunk.strip():
+                message = await ctx.channel.send(chunk)
+                last_messages.append(message)
+            else:
+                logging.info("Skipping empty or whitespace-only message chunk.")
+        return last_messages
 
     discord_client.run(token=discord_api_token)
 

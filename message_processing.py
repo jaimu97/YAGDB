@@ -13,21 +13,20 @@ def get_encoding_for_model(model):
     return tiktoken.encoding_for_model(model)
 
 
-async def prepare_message_history(current_message, settings, enc, client) -> Tuple:
+async def prepare_message_history(interaction, settings, enc, client) -> Tuple:
     """Prepare message history for the OpenAI API using the "chat" format (system, user, assistant)."""
     user_message = {
         "role": "user",
-        "content": f"{current_message.author.name}#{current_message.author.discriminator}: "
-                   f"{current_message.clean_content}"
+        "content": f"{interaction.user.name}#{interaction.user.discriminator}: {interaction.data.get('content', '')}"
     }
 
     message_history = [
-        {"role": "system", "content": f'{settings["prompt_system"]}'}
+        {"role": "system", "content": f'{settings["system_prompt"]}'}
     ]
     token_count = count_tokens(user_message["content"], enc)
 
-    async for msg in current_message.channel.history(limit=100, oldest_first=False):
-        if msg.id == current_message.id:
+    async for msg in interaction.channel.history(limit=100, oldest_first=False):
+        if msg.id == interaction.id:
             continue
         if msg.author == client.user:
             role = "assistant"
@@ -48,17 +47,18 @@ async def prepare_message_history(current_message, settings, enc, client) -> Tup
     return message_history, token_count
 
 
-async def generate_response(message_history, current_message, settings, client):
+async def generate_response(message_history, interaction, settings, client):
     """Generate a response using the OpenAI API."""
     loop = asyncio.get_running_loop()
-    response = await loop.run_in_executor(None,
-                                          lambda: client.chat.completions.create(
-                                              model=settings["prompt_model"],
-                                              messages=message_history,
-                                              temperature=0.7,
-                                              top_p=0.9,
-                                              max_tokens=settings["prompt_max_tokens"],
-                                              user=f"{current_message.author.name}#"
-                                                   f"{current_message.author.discriminator}"),
-                                          )
+    response = await loop.run_in_executor(
+        None,
+        lambda: client.chat.completions.create(
+            model=settings["prompt_model"],
+            messages=message_history,
+            temperature=0.7,
+            top_p=0.9,
+            max_tokens=settings["prompt_max_tokens"],
+            user=f"{interaction.user.name}#{interaction.user.discriminator}"
+        ),
+    )
     return response.choices[0].message.content.strip()

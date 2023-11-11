@@ -17,7 +17,8 @@ def load_settings(file_name):
     except FileNotFoundError:
         settings = {
             "prompt_model": "gpt-3.5-turbo-16k",
-            "prompt_system": "{Put your system prompt here!}",
+            "system_prompt": "{Put your system prompt here!}",
+            "welcome_prompt": "{Put your welcome prompt here!}",
             "prompt_max_tokens": 512,
             "logging_level": "INFO",
             "discord_intents": {
