@@ -13,13 +13,30 @@ from discord_intents import setup_intents
 from message_processing import (
     prepare_message_history,
     generate_response,
+    generate_auto_response,
     get_encoding_for_model,
+    auto_prepare_message_history,
 )
 
 last_messages = []
 last_user_message = None
 voice_channel_id = None
 disconnect_timer = None
+
+auto_tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "do_auto_reply",
+            "description": "Makes the bot generate a reply in the channel.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    }
+]
 
 # Shitty fix for mac.
 if not discord.opus.is_loaded():
@@ -223,6 +240,19 @@ def main():
                                 ephemeral=True)
 
     @tree.command(
+        name="auto_reply",
+        description="Make the bot automatically reply when appropriate"
+    )
+    async def auto_reply(ctx: discord.Interaction, toggle: bool):
+        if ctx.user.id not in settings["bot_admins"]:
+            await ctx.response.send_message("You do not have permission to use this tool!", ephemeral=True)
+            return
+
+        settings["auto_reply"] = toggle
+        save_settings("settings.json", settings)
+        await ctx.response.send_message(f"Auto reply set to: `{toggle}`!", ephemeral=True)
+
+    @tree.command(
         name="regenerate",
         description="Delete the last reply made by the bot and generate a new one",
     )
@@ -254,7 +284,44 @@ def main():
         description="Prompt the bot to reply to a message",
     )
     async def reply_command(ctx: discord.Interaction):
-        global last_messages, last_user_message
+        await do_reply(ctx)
+
+    @discord_client.event
+    async def on_message(current_message):
+        global auto_tools
+
+        if current_message.author == discord_client.user:
+            return
+        if current_message.channel.id not in settings["whitelist_channels"]:
+            return
+
+        if settings["auto_reply"]:
+            try:
+                logging.info("Determining if auto-reply is appropriate...")
+
+                message_history, token_count = await auto_prepare_message_history(current_message, settings, enc,
+                                                                                  discord_client)
+
+                reply = await generate_auto_response(message_history, current_message, settings, openai_client,
+                                                     auto_tools)
+
+                logging.info(f"Received reply from OpenAI: {reply.content}")
+
+                tool_calls = reply.tool_calls
+
+                if tool_calls:
+                    for tool_call in tool_calls:
+                        if tool_call.function.name == "do_auto_reply":
+                            logging.info("Calling 'do_auto_reply' function")
+                            await do_auto_reply(current_message)
+                else:
+                    logging.info("No tool calls found")
+
+            except Exception as e:
+                logging.error(f"Got an error:\n{e}\nPlease try again later!")
+
+    async def do_reply(ctx):
+        global last_messages, last_user_message, story_tools
 
         await ctx.response.defer(ephemeral=True)
 
@@ -266,7 +333,7 @@ def main():
 
         logging.info(f"Total token count: {token_count}")
 
-        reply = await generate_response(message_history, ctx, settings, openai_client)
+        reply = await generate_response(message_history, ctx, settings, openai_client, story_tools)
 
         if reply:
             last_messages = await send_reply_chunks(ctx, reply)
@@ -275,6 +342,37 @@ def main():
 
         last_user_message = ctx
         await ctx.followup.send("Replied to the message!", ephemeral=True)
+
+    async def do_auto_reply(current_message):
+        global last_messages, last_user_message, story_tools
+
+        message_history, token_count = await auto_prepare_message_history(current_message, settings, enc,
+                                                                          discord_client)
+
+        for msg in message_history:
+            logging.info(f"{msg['role']}: {msg['content']}")
+
+        reply = await generate_response(message_history, current_message, settings, openai_client, story_tools)
+
+        if reply:
+            last_messages = await auto_send_reply_chunks(current_message, reply)
+        else:
+            logging.info("Received empty reply from OpenAI! Skipping...")
+
+        last_user_message = current_message
+
+    async def auto_send_reply_chunks(current_message, reply):
+        max_length = 2000
+        reply_chunks = [reply[i:i + max_length] for i in range(0, len(reply), max_length)]
+
+        last_messages = []
+        for chunk in reply_chunks:
+            if chunk.strip():
+                message = await current_message.channel.send(chunk)
+                last_messages.append(message)
+            else:
+                logging.info("Skipping empty or whitespace-only message chunk.")
+        return last_messages
 
     async def send_reply_chunks(ctx, reply):
         max_length = 2000

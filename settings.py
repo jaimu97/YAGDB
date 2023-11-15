@@ -19,6 +19,8 @@ def load_settings(file_name):
             "prompt_model": "gpt-3.5-turbo-16k",
             "system_prompt": "{Put your system prompt here!}",
             "welcome_prompt": "{Put your welcome prompt here!}",
+            "auto_reply_prompt": "{Put your auto-reply prompt here!}",
+            "auto_reply": False,
             "prompt_max_tokens": 512,
             "logging_level": "INFO",
             "discord_intents": {
